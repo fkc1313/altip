@@ -1,0 +1,70 @@
+#!/bin/bash
+
+IP_OLD="$1"
+IP_NEW="$2"
+
+if [ -z "$IP_OLD" ] || [ -z "$IP_NEW" ]; then
+    read -p "IP a substituir: " IP_OLD
+    read -p "Novo IP: " IP_NEW
+fi
+
+for IP in "$IP_OLD" "$IP_NEW"; do
+    [[ "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "IP inválido: $IP"; exit 1; }
+done
+
+echo "Substituindo $IP_OLD -> $IP_NEW (sem backup, preservando timestamps)..."
+
+find /var/log -type f 2>/dev/null |
+while read -r LOG; do
+    # Pula arquivos binários conhecidos
+    case "$(basename "$LOG")" in
+        wtmp|wtmp-*|btmp|btmp-*|lastlog|lastlog-*|utmp) continue ;;
+    esac
+
+    case "$LOG" in
+        *.gz)
+            if zcat "$LOG" 2>/dev/null | grep -q "$IP_OLD"; then
+                # Captura os três timestamps ANTES de alterar
+                mtime=$(stat -c %Y "$LOG")
+                atime=$(stat -c %X "$LOG")
+                ctime_ref=$(stat -c %Z "$LOG")  # ctime não é alterável diretamente
+
+                zcat "$LOG" | sed "s/$IP_OLD/$IP_NEW/g" | gzip > "${LOG}.tmp" \
+                    && mv "${LOG}.tmp" "$LOG"
+
+                # Restaura timestamps para os originais
+                touch -a -d "@$atime" "$LOG"
+                touch -m -d "@$mtime" "$LOG"
+                echo "  [gz] $LOG"
+            fi
+            ;;
+        *)
+            if grep -aq "$IP_OLD" "$LOG" 2>/dev/null && file "$LOG" | grep -qi text; then
+                mtime=$(stat -c %Y "$LOG")
+                atime=$(stat -c %X "$LOG")
+
+                sed -i "s/$IP_OLD/$IP_NEW/g" "$LOG"
+
+                touch -a -d "@$atime" "$LOG"
+                touch -m -d "@$mtime" "$LOG"
+                echo "  [texto] $LOG"
+            fi
+            ;;
+    esac
+done
+
+# Histórico de shells
+for H in ~/.bash_history ~/.zsh_history ~/.sh_history /root/.bash_history /root/.zsh_history; do
+    if [ -f "$H" ] && grep -q "$IP_OLD" "$H" 2>/dev/null; then
+        mtime=$(stat -c %Y "$H")
+        atime=$(stat -c %X "$H")
+        sed -i "s/$IP_OLD/$IP_NEW/g" "$H"
+        touch -a -d "@$atime" "$H"
+        touch -m -d "@$mtime" "$H"
+        echo "  [histórico] $H"
+    fi
+done
+
+echo
+echo "Concluído. Verificação final:"
+grep -rl "$IP_OLD" /var/log 2>/dev/null || echo "Nenhuma ocorrência de $IP_OLD em /var/log."
